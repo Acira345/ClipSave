@@ -26,6 +26,7 @@ import requests
 VERSION_CHECK_URL = "https://raw.githubusercontent.com/Acira345/ClipSave/main/version.json"
 
 
+
 def _version_a_tupla(version_str: str) -> tuple:
     """Convierte '1.10.2' en (1, 10, 2) para poder comparar versiones bien
     (una comparación de texto simple fallaría, ej. '1.9' vs '1.10')."""
