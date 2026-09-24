@@ -1,0 +1,11 @@
+Coloca aquí el archivo ffmpeg.exe (para Windows).
+
+Descárgalo desde: https://www.gyan.dev/ffmpeg/builds/
+-> Sección "release builds" -> descarga el .zip "essentials"
+-> Dentro del zip: bin\ffmpeg.exe
+-> Cópialo a esta carpeta como: bin\ffmpeg.exe
+
+Sin este archivo, el build.bat igual va a compilar el programa,
+pero el .exe final no incluirá ffmpeg y fallará en cualquier PC
+que no lo tenga instalado por separado (que es justo el problema
+que estabas teniendo).

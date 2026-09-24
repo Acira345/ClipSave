@@ -1,0 +1,13 @@
+# Carpetas que genera PyInstaller / Inno Setup — no se suben al repo
+build/
+dist/
+Output/
+*.spec
+__pycache__/
+*.pyc
+
+# El ffmpeg pesa ~100 MB, GitHub se pone incómodo con archivos así de
+# grandes en el repo normal. Mejor: no lo subas al código, y en el
+# README explica que hay que descargarlo aparte (como ya lo documenta
+# bin/LEEME.txt). Si prefieres subirlo de todas formas, quita esta línea.
+bin/ffmpeg.exe
