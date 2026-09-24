@@ -18,7 +18,7 @@ from PIL import Image
 
 from core import thumbnails, updater, youtube
 from core.resources import resource_path
-from core.utils import format_duration, truncate_path
+from core.utils import abrir_carpeta, format_duration, truncate_path
 from core.version import APP_VERSION
 from ui import styles
 
@@ -41,6 +41,8 @@ class ClipSaveApp(ctk.CTk):
         self.current_video_info = None
         self.download_type = tk.StringVar(value="video")
         self.quality_options_map = {}  # label -> valor (height o bitrate)
+        self._spinner_index = 0
+        self._animando_spinner = False
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -105,11 +107,19 @@ class ClipSaveApp(ctk.CTk):
         self.url_entry = ctk.CTkEntry(self.search_frame, placeholder_text="https://www.youtube.com/watch?v=...",
                                        fg_color="transparent", border_width=0, text_color=styles.COLOR_TEXT_MAIN, height=45)
         self.url_entry.pack(side="left", fill="x", expand=True, padx=10)
+        self.url_entry.bind("<Return>", lambda e: self.analizar_url())
+        self.url_entry.bind("<Button-3>", self._mostrar_menu_contextual)
 
         self.btn_analizar = ctk.CTkButton(self.search_frame, text="Analizar", command=self.analizar_url,
                                            fg_color=styles.COLOR_DARK, hover_color=styles.COLOR_DARK_HOVER,
                                            width=100, height=35)
-        self.btn_analizar.pack(side="right", padx=10, pady=5)
+        self.btn_analizar.pack(side="right", padx=(0, 10), pady=5)
+
+        self.btn_refrescar = ctk.CTkButton(self.search_frame, text="⟳", command=self.reiniciar_formulario,
+                                            fg_color="transparent", text_color=styles.COLOR_TEXT_SECONDARY,
+                                            hover_color=styles.COLOR_BORDER, width=35, height=35,
+                                            font=("Arial", 16))
+        self.btn_refrescar.pack(side="right", padx=(0, 5), pady=5)
 
         self.preview_frame = ctk.CTkFrame(self.main_content, fg_color=styles.COLOR_BG_WHITE, corner_radius=12,
                                            border_width=1, border_color=styles.COLOR_BORDER)
@@ -120,22 +130,44 @@ class ClipSaveApp(ctk.CTk):
         self.recent_frame.grid(row=1, column=1, sticky="nsew")
         self.recent_frame.grid_propagate(False)
 
-        ctk.CTkLabel(self.recent_frame, text="Descarga actual", font=styles.FONT_SECTION,
+        ctk.CTkLabel(self.recent_frame, text="Historial", font=styles.FONT_SECTION,
                      text_color=styles.COLOR_TEXT_MAIN).pack(anchor="w", padx=20, pady=(20, 10))
-
-        self.progress_bar = ctk.CTkProgressBar(self.recent_frame, progress_color=styles.COLOR_PRIMARY,
-                                                fg_color=styles.COLOR_BORDER_ALT)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", padx=20, pady=5)
-
-        self.progress_text = ctk.CTkLabel(self.recent_frame, text="Esperando enlace...",
-                                           text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
-                                           wraplength=310, justify="left")
-        self.progress_text.pack(anchor="w", padx=20, pady=5)
+        ctk.CTkLabel(self.recent_frame, text="Aquí van a aparecer tus últimas descargas.",
+                     text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
+                     wraplength=310, justify="left").pack(anchor="w", padx=20, pady=5)
 
     # ------------------------------------------------------------------
     # Análisis de URL (dispara lógica en core.youtube)
     # ------------------------------------------------------------------
+
+    def reiniciar_formulario(self):
+        """Limpia la URL, la previsualización y el progreso, sin reiniciar la app."""
+        self.url_entry.delete(0, tk.END)
+        self.current_video_info = None
+        self.preview_frame.pack_forget()
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.set(0)
+            self.progress_text.configure(text="Esperando enlace...")
+        self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
+
+    def _mostrar_menu_contextual(self, event):
+        # CTkEntry envuelve un tkinter.Entry interno (self.url_entry._entry);
+        # los eventos <<Cut>>/<<Copy>>/<<Paste>> hay que mandarlos a ese
+        # widget interno, no al CTkEntry de afuera, o si no no hacen nada.
+        entry_interno = self.url_entry._entry
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Cortar", command=lambda: entry_interno.event_generate("<<Cut>>"))
+        menu.add_command(label="Copiar", command=lambda: entry_interno.event_generate("<<Copy>>"))
+        menu.add_command(label="Pegar", command=lambda: entry_interno.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(
+            label="Seleccionar todo",
+            command=lambda: (entry_interno.select_range(0, tk.END), entry_interno.icursor(tk.END)),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def analizar_url(self):
         url = self.url_entry.get()
@@ -144,9 +176,19 @@ class ClipSaveApp(ctk.CTk):
             return
 
         self.status_label.configure(text="● Analizando...", text_color=styles.COLOR_WARNING)
-        self.btn_analizar.configure(state="disabled", text="...")
+        self.btn_analizar.configure(state="disabled")
+        self._animando_spinner = True
+        self._animar_spinner_analizar()
 
         threading.Thread(target=self._hilo_analizar, args=(url,), daemon=True).start()
+
+    def _animar_spinner_analizar(self):
+        if not getattr(self, "_animando_spinner", False):
+            return
+        frame = styles.SPINNER_FRAMES[self._spinner_index % len(styles.SPINNER_FRAMES)]
+        self.btn_analizar.configure(text=frame)
+        self._spinner_index += 1
+        self.after(120, self._animar_spinner_analizar)
 
     def _hilo_analizar(self, url):
         try:
@@ -157,6 +199,7 @@ class ClipSaveApp(ctk.CTk):
             self.after(0, self._resetear_busqueda)
 
     def _resetear_busqueda(self):
+        self._animando_spinner = False
         self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
         self.btn_analizar.configure(state="normal", text="Analizar")
         self.url_entry.delete(0, tk.END)
@@ -249,6 +292,30 @@ class ClipSaveApp(ctk.CTk):
         )
         self.btn_descargar_ya.pack(fill="x", padx=15, pady=20)
 
+        # Ocupa el mismo lugar que el botón, pero arranca oculto: se
+        # muestra en vez del botón mientras la descarga está en curso.
+        self.progress_inline_frame = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
+
+        self.progress_bar = ctk.CTkProgressBar(self.progress_inline_frame, progress_color=styles.COLOR_PRIMARY,
+                                                fg_color=styles.COLOR_BORDER_ALT, height=12)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(fill="x", pady=(0, 8))
+
+        self.progress_text = ctk.CTkLabel(self.progress_inline_frame, text="Iniciando descarga...",
+                                           text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
+                                           wraplength=500, justify="left")
+        self.progress_text.pack(anchor="w")
+
+    def _mostrar_barra_progreso(self):
+        self.btn_descargar_ya.pack_forget()
+        self.progress_bar.set(0)
+        self.progress_text.configure(text="Iniciando descarga...")
+        self.progress_inline_frame.pack(fill="x", padx=15, pady=20)
+
+    def _ocultar_barra_progreso(self):
+        self.progress_inline_frame.pack_forget()
+        self.btn_descargar_ya.pack(fill="x", padx=15, pady=20)
+
     # ------------------------------------------------------------------
     # Selección de tipo y calidad (usa core.youtube para calcular opciones)
     # ------------------------------------------------------------------
@@ -308,11 +375,21 @@ class ClipSaveApp(ctk.CTk):
             )
             return
 
-        self.btn_descargar_ya.configure(state="disabled", text="Descargando...")
+        tipo = self.download_type.get()
+        ruta_final = youtube.predecir_ruta_final(self.download_path, tipo, self.current_video_info)
+        if os.path.exists(ruta_final):
+            reemplazar = messagebox.askyesno(
+                "El archivo ya existe",
+                f"'{os.path.basename(ruta_final)}' ya existe en la carpeta de descargas.\n"
+                "¿Quieres reemplazarlo?",
+            )
+            if not reemplazar:
+                return
+
+        self._mostrar_barra_progreso()
         self.status_label.configure(text="● Descargando...", text_color=styles.COLOR_PRIMARY)
 
         url = self.current_video_info["webpage_url"]
-        tipo = self.download_type.get()
         label_calidad = self.quality_dropdown.get()
         valor_calidad = self.quality_options_map.get(label_calidad)
 
@@ -325,7 +402,10 @@ class ClipSaveApp(ctk.CTk):
     def _hilo_descarga(self, url, opts):
         try:
             youtube.descargar(url, opts)
-            self.after(0, lambda: messagebox.showinfo("Éxito", "Descarga completada correctamente."))
+            try:
+                abrir_carpeta(self.download_path)
+            except Exception:
+                pass  # Si no se pudo abrir la carpeta, no interrumpe el flujo de éxito
         except Exception as e:
             mensaje_error = str(e)
             self.after(0, lambda m=mensaje_error: messagebox.showerror("Error", f"Hubo un problema:\n{m}"))
@@ -333,10 +413,8 @@ class ClipSaveApp(ctk.CTk):
             self.after(0, self._finalizar_estado_descarga)
 
     def _finalizar_estado_descarga(self):
-        self.btn_descargar_ya.configure(state="normal", text="⬇️ Descargar ahora")
+        self._ocultar_barra_progreso()
         self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
-        self.progress_bar.set(0)
-        self.progress_text.configure(text="Descarga finalizada.")
 
     # ------------------------------------------------------------------
     # Actualizaciones

@@ -119,6 +119,9 @@ def construir_opciones_descarga(
     if tipo == "mp3":
         opts.update({
             "format": "bestaudio/best",
+            # Sin esto, yt_dlp puede dejar el archivo original (.webm/.m4a)
+            # junto al .mp3 ya convertido en vez de borrarlo.
+            "keepvideo": False,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -148,6 +151,20 @@ def construir_opciones_descarga(
         })
 
     return opts
+
+
+def predecir_ruta_final(download_path: str, tipo: str, info: dict) -> str:
+    """
+    Calcula la ruta completa donde va a quedar el archivo una vez
+    terminada la descarga (con la extensión final: mp3 o mp4), para
+    poder revisar de antemano si ya existe un archivo con ese nombre.
+    """
+    ext_final = "mp3" if tipo == "mp3" else "mp4"
+    outtmpl = os.path.join(download_path, "%(title)s.%(ext)s")
+    with yt_dlp.YoutubeDL({"outtmpl": outtmpl, "quiet": True, "no_warnings": True}) as ydl:
+        nombre_base = ydl.prepare_filename(info)
+    raiz, _ = os.path.splitext(nombre_base)
+    return f"{raiz}.{ext_final}"
 
 
 def descargar(url: str, opts: dict) -> None:

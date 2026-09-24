@@ -31,6 +31,9 @@ FONT_LABEL_SMALL = ("Arial", 11)
 FONT_YOUTUBE_TAG = ("Arial", 11, "bold")
 FONT_BUTTON = ("Arial", 14, "bold")
 
+# Animación
+SPINNER_FRAMES = ["◐", "◓", "◑", "◒"]
+
 # Tamaños
 WINDOW_SIZE = "1200x750"
 HEADER_HEIGHT = 60
