@@ -11,7 +11,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from io import BytesIO
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
 from PIL import Image
@@ -20,7 +20,7 @@ from core import thumbnails, updater, youtube
 from core.resources import resource_path
 from core.utils import abrir_carpeta, format_duration, truncate_path
 from core.version import APP_VERSION
-from ui import styles
+from ui import dialogs, styles
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("dark-blue")
@@ -141,13 +141,17 @@ class ClipSaveApp(ctk.CTk):
     # ------------------------------------------------------------------
 
     def reiniciar_formulario(self):
-        """Limpia la URL, la previsualización y el progreso, sin reiniciar la app."""
+        """Limpia la URL, la previsualización y el progreso, sin reiniciar la app.
+        También destraba el botón 'Analizar' por si se quedó pegado en el spinner
+        (ej. una URL que nunca responde)."""
         self.url_entry.delete(0, tk.END)
         self.current_video_info = None
         self.preview_frame.pack_forget()
         if hasattr(self, "progress_bar"):
             self.progress_bar.set(0)
             self.progress_text.configure(text="Esperando enlace...")
+        self._animando_spinner = False
+        self.btn_analizar.configure(state="normal", text="Analizar")
         self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
 
     def _mostrar_menu_contextual(self, event):
@@ -172,7 +176,7 @@ class ClipSaveApp(ctk.CTk):
     def analizar_url(self):
         url = self.url_entry.get()
         if not url:
-            messagebox.showwarning("Error", "Por favor, pega una URL de YouTube.")
+            dialogs.mostrar_advertencia(self, "Falta la URL", "Por favor, pega una URL de YouTube.")
             return
 
         self.status_label.configure(text="● Analizando...", text_color=styles.COLOR_WARNING)
@@ -195,7 +199,7 @@ class ClipSaveApp(ctk.CTk):
             info = youtube.analizar_url(url)
             self.after(0, self._mostrar_previsualizacion, info)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Error", f"No se pudo analizar la URL:\n{str(e)}"))
+            self.after(0, lambda: dialogs.mostrar_error(self, "No se pudo analizar", str(e)))
             self.after(0, self._resetear_busqueda)
 
     def _resetear_busqueda(self):
@@ -368,8 +372,8 @@ class ClipSaveApp(ctk.CTk):
             return
 
         if not youtube.ffmpeg_disponible():
-            messagebox.showerror(
-                "Falta un componente",
+            dialogs.mostrar_error(
+                self, "Falta un componente",
                 "No se encontró ffmpeg. Reinstala ClipSave con la versión más reciente "
                 "del instalador, que ya lo incluye.",
             )
@@ -378,8 +382,8 @@ class ClipSaveApp(ctk.CTk):
         tipo = self.download_type.get()
         ruta_final = youtube.predecir_ruta_final(self.download_path, tipo, self.current_video_info)
         if os.path.exists(ruta_final):
-            reemplazar = messagebox.askyesno(
-                "El archivo ya existe",
+            reemplazar = dialogs.confirmar(
+                self, "El archivo ya existe",
                 f"'{os.path.basename(ruta_final)}' ya existe en la carpeta de descargas.\n"
                 "¿Quieres reemplazarlo?",
             )
@@ -408,7 +412,7 @@ class ClipSaveApp(ctk.CTk):
                 pass  # Si no se pudo abrir la carpeta, no interrumpe el flujo de éxito
         except Exception as e:
             mensaje_error = str(e)
-            self.after(0, lambda m=mensaje_error: messagebox.showerror("Error", f"Hubo un problema:\n{m}"))
+            self.after(0, lambda m=mensaje_error: dialogs.mostrar_error(self, "Error al descargar", m))
         finally:
             self.after(0, self._finalizar_estado_descarga)
 

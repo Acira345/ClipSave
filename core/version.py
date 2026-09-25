@@ -5,4 +5,4 @@ la interfaz (para mostrarla) como el chequeo de actualizaciones
 (para compararla contra la más reciente publicada).
 """
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
