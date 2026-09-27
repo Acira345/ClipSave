@@ -16,7 +16,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image
 
-from core import thumbnails, updater, youtube
+from core import configuracion, historial, thumbnails, updater, youtube
 from core.resources import resource_path
 from core.utils import abrir_carpeta, format_duration, truncate_path
 from core.version import APP_VERSION
@@ -35,6 +35,12 @@ class ClipSaveApp(ctk.CTk):
         self.resizable(False, False)
 
         self._configurar_icono()
+
+        # Aplica el modo claro/oscuro guardado de la última vez, ANTES de
+        # construir los widgets, para que abran ya con el color correcto.
+        self.config_guardada = configuracion.cargar_config()
+        modo_oscuro_guardado = self.config_guardada.get("modo_oscuro", False)
+        ctk.set_appearance_mode("Dark" if modo_oscuro_guardado else "Light")
 
         # Estado
         self.download_path = os.path.join(os.path.expanduser("~"), "Downloads")
@@ -74,9 +80,16 @@ class ClipSaveApp(ctk.CTk):
         self.header_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.header_frame.grid_propagate(False)
 
+        try:
+            logo_img = Image.open(resource_path("logo.png"))
+            self.logo_ctk = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(32, 32))
+            ctk.CTkLabel(self.header_frame, image=self.logo_ctk, text="").pack(side="left", padx=(30, 8), pady=15)
+        except Exception:
+            pass  # Si falta logo.png, la app sigue funcionando solo con el texto
+
         ctk.CTkLabel(self.header_frame, text="ClipSave", text_color=styles.COLOR_PRIMARY,
-                     font=styles.FONT_LOGO).pack(side="left", padx=(30, 10), pady=15)
-        ctk.CTkLabel(self.header_frame, text=APP_VERSION, text_color="#A6ACAF",
+                     font=styles.FONT_LOGO).pack(side="left", padx=(0, 10), pady=15)
+        ctk.CTkLabel(self.header_frame, text=APP_VERSION, text_color=styles.COLOR_TEXT_FAINT,
                      font=styles.FONT_VERSION).pack(side="left", pady=15)
 
         # Aviso de actualización disponible: arranca oculto, se muestra
@@ -90,6 +103,21 @@ class ClipSaveApp(ctk.CTk):
         self.status_label = ctk.CTkLabel(self.header_frame, text="● Listo",
                                           text_color=styles.COLOR_SUCCESS, font=styles.FONT_STATUS)
         self.status_label.pack(side="right", padx=30, pady=15)
+
+        self.switch_modo_oscuro = ctk.CTkSwitch(
+            self.header_frame, text="🌙", width=40, command=self._alternar_modo_oscuro,
+            text_color=styles.COLOR_TEXT_SECONDARY, font=styles.FONT_STATUS,
+            progress_color=styles.COLOR_DARK,
+        )
+        self.switch_modo_oscuro.pack(side="right", padx=(0, 10), pady=15)
+        if self.config_guardada.get("modo_oscuro", False):
+            self.switch_modo_oscuro.select()  # No dispara el command, así que no hay doble guardado
+
+    def _alternar_modo_oscuro(self):
+        modo_oscuro = bool(self.switch_modo_oscuro.get())
+        ctk.set_appearance_mode("Dark" if modo_oscuro else "Light")
+        self.config_guardada["modo_oscuro"] = modo_oscuro
+        configuracion.guardar_config(self.config_guardada)
 
     def _construir_contenido_principal(self):
         self.main_content = ctk.CTkScrollableFrame(self, corner_radius=0, fg_color=styles.COLOR_BG_CONTENT)
@@ -132,9 +160,55 @@ class ClipSaveApp(ctk.CTk):
 
         ctk.CTkLabel(self.recent_frame, text="Historial", font=styles.FONT_SECTION,
                      text_color=styles.COLOR_TEXT_MAIN).pack(anchor="w", padx=20, pady=(20, 10))
-        ctk.CTkLabel(self.recent_frame, text="Aquí van a aparecer tus últimas descargas.",
-                     text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
-                     wraplength=310, justify="left").pack(anchor="w", padx=20, pady=5)
+
+        self.historial_frame = ctk.CTkScrollableFrame(self.recent_frame, fg_color="transparent")
+        self.historial_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self._refrescar_historial()
+
+    def _refrescar_historial(self):
+        for widget in self.historial_frame.winfo_children():
+            widget.destroy()
+
+        entradas = historial.cargar_historial()
+        if not entradas:
+            ctk.CTkLabel(self.historial_frame, text="Aquí van a aparecer tus últimas descargas.",
+                         text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
+                         wraplength=250, justify="left").pack(fill="x", padx=10, pady=5)
+            return
+
+        for entrada in entradas:
+            self._crear_item_historial(entrada)
+
+    def _crear_item_historial(self, entrada: dict):
+        icono = "🎵" if entrada["tipo"] == "mp3" else "🎬"
+        item = ctk.CTkFrame(self.historial_frame, fg_color=styles.COLOR_BG_WHITE, corner_radius=8, cursor="hand2")
+        item.pack(fill="x", pady=4)
+
+        contenido = ctk.CTkFrame(item, fg_color="transparent")
+        contenido.pack(fill="x", padx=10, pady=8)
+
+        fila_superior = ctk.CTkFrame(contenido, fg_color="transparent")
+        fila_superior.pack(fill="x")
+        ctk.CTkLabel(fila_superior, text=icono, font=("Arial", 14)).pack(side="left", padx=(0, 6))
+        titulo = entrada["titulo"]
+        if len(titulo) > 38:
+            titulo = titulo[:38] + "..."
+        ctk.CTkLabel(fila_superior, text=titulo, font=styles.FONT_LABEL_SMALL,
+                     text_color=styles.COLOR_TEXT_MAIN, anchor="w").pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(contenido, text=entrada["fecha"], font=("Arial", 10),
+                     text_color=styles.COLOR_TEXT_MUTED, anchor="w").pack(anchor="w", pady=(2, 0))
+
+        # Click en cualquier parte del ítem abre la carpeta donde quedó el archivo
+        for widget in (item, contenido, fila_superior):
+            widget.bind("<Button-1>", lambda e, ruta=entrada["ruta"]: self._abrir_carpeta_de_historial(ruta))
+
+    def _abrir_carpeta_de_historial(self, ruta_archivo: str):
+        try:
+            abrir_carpeta(os.path.dirname(ruta_archivo))
+        except Exception:
+            pass  # La carpeta pudo haberse movido o borrado desde entonces
 
     # ------------------------------------------------------------------
     # Análisis de URL (dispara lógica en core.youtube)
@@ -290,7 +364,7 @@ class ClipSaveApp(ctk.CTk):
 
     def _mostrar_boton_descarga(self):
         self.btn_descargar_ya = ctk.CTkButton(
-            self.preview_frame, text="⬇️ Descargar ahora", command=self.iniciar_descarga,
+            self.preview_frame, text="Descargar ahora", command=self.iniciar_descarga,
             fg_color=styles.COLOR_PRIMARY, hover_color=styles.COLOR_PRIMARY_HOVER,
             font=styles.FONT_BUTTON, height=45,
         )
@@ -400,16 +474,19 @@ class ClipSaveApp(ctk.CTk):
         opts = youtube.construir_opciones_descarga(
             self.download_path, tipo, valor_calidad, progress_hook=self._progress_hook,
         )
+        titulo = self.current_video_info.get("title", "Sin título")
 
-        threading.Thread(target=self._hilo_descarga, args=(url, opts), daemon=True).start()
+        threading.Thread(target=self._hilo_descarga, args=(url, opts, titulo, tipo, ruta_final), daemon=True).start()
 
-    def _hilo_descarga(self, url, opts):
+    def _hilo_descarga(self, url, opts, titulo, tipo, ruta_final):
         try:
             youtube.descargar(url, opts)
             try:
                 abrir_carpeta(self.download_path)
             except Exception:
                 pass  # Si no se pudo abrir la carpeta, no interrumpe el flujo de éxito
+            historial.agregar_entrada(titulo, tipo, ruta_final)
+            self.after(0, self._refrescar_historial)
         except Exception as e:
             mensaje_error = str(e)
             self.after(0, lambda m=mensaje_error: dialogs.mostrar_error(self, "Error al descargar", m))

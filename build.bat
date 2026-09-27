@@ -55,6 +55,7 @@ python -m PyInstaller main.py ^
     --icon icono.ico ^
     --add-binary "bin\ffmpeg.exe;bin" ^
     --add-data "icono.ico;." ^
+    --add-data "logo.png;." ^
     --collect-data customtkinter
 
 if errorlevel 1 (
