@@ -181,7 +181,7 @@ class ClipSaveApp(ctk.CTk):
             self._crear_item_historial(entrada)
 
     def _crear_item_historial(self, entrada: dict):
-        icono = "🎵" if entrada["tipo"] == "mp3" else "🎬"
+        icono = "🎵" if entrada["tipo"] in ("mp3", "wav") else "🎬"
         item = ctk.CTkFrame(self.historial_frame, fg_color=styles.COLOR_BG_WHITE, corner_radius=8, cursor="hand2")
         item.pack(fill="x", pady=4)
 
@@ -269,9 +269,16 @@ class ClipSaveApp(ctk.CTk):
         self.after(120, self._animar_spinner_analizar)
 
     def _hilo_analizar(self, url):
+        def progreso(actual, total):
+            self.after(0, lambda: self.status_label.configure(
+                text=f"● Analizando {actual}/{total}...", text_color=styles.COLOR_WARNING))
+
         try:
-            info = youtube.analizar_url(url)
-            self.after(0, self._mostrar_previsualizacion, info)
+            resultado = youtube.analizar_entrada(url, progreso_callback=progreso)
+            if resultado["tipo"] == "playlist":
+                self.after(0, self._mostrar_previsualizacion_playlist, resultado)
+            else:
+                self.after(0, self._mostrar_previsualizacion, resultado["info"])
         except Exception as e:
             self.after(0, lambda: dialogs.mostrar_error(self, "No se pudo analizar", str(e)))
             self.after(0, self._resetear_busqueda)
@@ -298,6 +305,240 @@ class ClipSaveApp(ctk.CTk):
         self._mostrar_selector_formato()
         self._mostrar_selector_ruta()
         self._mostrar_boton_descarga()
+
+    # ------------------------------------------------------------------
+    # Previsualización y descarga de PLAYLISTS
+    # ------------------------------------------------------------------
+
+    def _mostrar_previsualizacion_playlist(self, resultado):
+        self._resetear_busqueda()
+
+        for widget in self.preview_frame.winfo_children():
+            widget.destroy()
+        self.preview_frame.pack(fill="x", padx=30, pady=20)
+
+        self.playlist_videos = resultado["videos"]
+        self.playlist_tipo_actual = "video"
+
+        ctk.CTkLabel(
+            self.preview_frame, text=f"📃 {resultado['titulo']} ({len(self.playlist_videos)} videos)",
+            font=styles.FONT_VIDEO_TITLE, text_color=styles.COLOR_TEXT_MAIN,
+            wraplength=500, justify="left",
+        ).pack(anchor="w", padx=15, pady=(15, 10))
+
+        format_frame = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
+        format_frame.pack(fill="x", padx=15, pady=5)
+        self.seg_button_playlist = ctk.CTkSegmentedButton(
+            format_frame, values=["Video (MP4)", "Audio (MP3)", "Audio (WAV)"],
+            command=self._cambiar_tipo_playlist, dynamic_resizing=False, width=390, height=35,
+            fg_color=styles.COLOR_BORDER, selected_color=styles.COLOR_BORDER_ALT,
+            unselected_color=styles.COLOR_BORDER, text_color=styles.COLOR_TEXT_MAIN,
+        )
+        self.seg_button_playlist.set("Video (MP4)")
+        self.seg_button_playlist.pack(anchor="w")
+
+        lista_frame = ctk.CTkScrollableFrame(self.preview_frame, height=280, fg_color=styles.COLOR_BG_LIGHT)
+        lista_frame.pack(fill="x", padx=15, pady=15)
+
+        self.playlist_filas = []
+        for info_video in self.playlist_videos:
+            self.playlist_filas.append(self._crear_fila_playlist(lista_frame, info_video))
+
+        self._actualizar_calidad_playlist("video")
+        self._mostrar_selector_ruta()
+        self._mostrar_boton_descarga_playlist()
+
+    def _crear_fila_playlist(self, lista_frame, info_video):
+        fila = ctk.CTkFrame(lista_frame, fg_color="transparent")
+        fila.pack(fill="x", pady=4)
+
+        var_incluir = tk.BooleanVar(value=True)
+        checkbox = ctk.CTkCheckBox(fila, text="", variable=var_incluir, width=20,
+                                    command=self._al_cambiar_seleccion_playlist)
+        checkbox.pack(side="left", padx=(0, 8))
+
+        titulo = info_video.get("title", "Sin título")
+        if len(titulo) > 45:
+            titulo = titulo[:45] + "..."
+        ctk.CTkLabel(fila, text=titulo, text_color=styles.COLOR_TEXT_MAIN, anchor="w",
+                     width=280, wraplength=280, justify="left").pack(side="left", padx=(0, 8))
+
+        opciones_video = youtube.obtener_opciones_video(info_video)
+        opciones_mp3 = youtube.obtener_opciones_mp3(info_video)
+        mapa_video = {op["label"]: op["height"] for op in opciones_video}
+        mapa_mp3 = {op["label"]: op["bitrate"] for op in opciones_mp3}
+        mapa_tam_video = {op["label"]: op["tamaño_mb"] for op in opciones_video}
+        mapa_tam_mp3 = {op["label"]: op["tamaño_mb"] for op in opciones_mp3}
+        mapa_tam_wav = {"Sin pérdida": youtube.estimar_tamaño_wav_mb(info_video)}
+
+        combo = ctk.CTkComboBox(fila, values=list(mapa_video.keys()), width=180,
+                                 fg_color=styles.COLOR_BG_WHITE, text_color=styles.COLOR_TEXT_MAIN,
+                                 command=lambda _: self._al_cambiar_seleccion_playlist())
+        combo.pack(side="left")
+
+        return {"info": info_video, "incluir": var_incluir, "combo": combo,
+                "mapa_video": mapa_video, "mapa_mp3": mapa_mp3,
+                "mapa_tam_video": mapa_tam_video, "mapa_tam_mp3": mapa_tam_mp3, "mapa_tam_wav": mapa_tam_wav}
+
+    def _cambiar_tipo_playlist(self, value):
+        if "Video" in value:
+            tipo = "video"
+        elif "WAV" in value:
+            tipo = "wav"
+        else:
+            tipo = "mp3"
+        self._actualizar_calidad_playlist(tipo)
+
+    def _actualizar_calidad_playlist(self, tipo):
+        self.playlist_tipo_actual = tipo
+        for fila in self.playlist_filas:
+            combo = fila["combo"]
+            if tipo == "video":
+                labels = list(fila["mapa_video"].keys())
+                combo.configure(state="normal", values=labels)
+                combo.set(labels[0])
+            elif tipo == "mp3":
+                labels = list(fila["mapa_mp3"].keys())
+                combo.configure(state="normal", values=labels)
+                combo.set(labels[0])
+            else:  # wav: sin pérdida, no hay calidad que elegir
+                combo.configure(state="disabled", values=["Sin pérdida"])
+                combo.set("Sin pérdida")
+        self._al_cambiar_seleccion_playlist()
+
+    def _al_cambiar_seleccion_playlist(self):
+        """Se llama cada vez que cambia algo que afecta cuánto se va a
+        descargar: marcar/desmarcar un video, cambiar su calidad, o
+        cambiar el formato general. Actualiza el contador del botón y
+        el tamaño total estimado."""
+        if hasattr(self, "btn_descargar_playlist"):
+            cantidad = sum(1 for f in self.playlist_filas if f["incluir"].get())
+            self.btn_descargar_playlist.configure(text=f"Descargar seleccionados ({cantidad})")
+
+        if hasattr(self, "playlist_total_label"):
+            clave_mapa = f"mapa_tam_{self.playlist_tipo_actual}"
+            total_mb = 0.0
+            for fila in self.playlist_filas:
+                if not fila["incluir"].get():
+                    continue
+                total_mb += fila[clave_mapa].get(fila["combo"].get(), 0)
+            self.playlist_total_label.configure(
+                text=f"Tamaño total estimado: ~{youtube.formatear_tamaño(total_mb)}")
+
+    def _mostrar_boton_descarga_playlist(self):
+        self.playlist_total_label = ctk.CTkLabel(
+            self.preview_frame, text="Tamaño total estimado: calculando...",
+            text_color=styles.COLOR_TEXT_SECONDARY, font=styles.FONT_LABEL_SMALL,
+        )
+        self.playlist_total_label.pack(anchor="w", padx=15, pady=(0, 8))
+        self._al_cambiar_seleccion_playlist()
+
+        cantidad = len(self.playlist_filas)
+        self.btn_descargar_playlist = ctk.CTkButton(
+            self.preview_frame, text=f"Descargar seleccionados ({cantidad})",
+            command=self.iniciar_descarga_playlist, fg_color=styles.COLOR_PRIMARY,
+            hover_color=styles.COLOR_PRIMARY_HOVER, font=styles.FONT_BUTTON, height=45,
+        )
+        self.btn_descargar_playlist.pack(fill="x", padx=15, pady=(0, 20))
+
+        self.playlist_progress_frame = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
+        self.playlist_progress_bar = ctk.CTkProgressBar(
+            self.playlist_progress_frame, progress_color=styles.COLOR_PRIMARY,
+            fg_color=styles.COLOR_BORDER_ALT, height=12)
+        self.playlist_progress_bar.set(0)
+        self.playlist_progress_bar.pack(fill="x", pady=(0, 8))
+        self.playlist_progress_label = ctk.CTkLabel(
+            self.playlist_progress_frame, text="Iniciando descarga...",
+            text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL)
+        self.playlist_progress_label.pack(anchor="w")
+
+    def iniciar_descarga_playlist(self):
+        if not youtube.ffmpeg_disponible():
+            dialogs.mostrar_error(
+                self, "Falta un componente",
+                "No se encontró ffmpeg. Reinstala ClipSave con la versión más reciente "
+                "del instalador, que ya lo incluye.",
+            )
+            return
+
+        seleccionados = [f for f in self.playlist_filas if f["incluir"].get()]
+        if not seleccionados:
+            dialogs.mostrar_advertencia(self, "Nada seleccionado",
+                                         "Marca al menos un video de la lista para descargar.")
+            return
+
+        tipo = self.playlist_tipo_actual
+        tareas = []
+        for fila in seleccionados:
+            if tipo == "video":
+                valor_calidad = fila["mapa_video"].get(fila["combo"].get())
+            elif tipo == "mp3":
+                valor_calidad = fila["mapa_mp3"].get(fila["combo"].get())
+            else:
+                valor_calidad = None
+            tareas.append({"info": fila["info"], "valor_calidad": valor_calidad})
+
+        self.btn_descargar_playlist.pack_forget()
+        self.playlist_progress_bar.set(0)
+        self.playlist_progress_label.configure(text="Iniciando descarga...")
+        self.playlist_progress_frame.pack(fill="x", padx=15, pady=(0, 20))
+        self.status_label.configure(text="● Descargando...", text_color=styles.COLOR_PRIMARY)
+
+        threading.Thread(target=self._hilo_descarga_playlist, args=(tareas, tipo), daemon=True).start()
+
+    def _hilo_descarga_playlist(self, tareas, tipo):
+        total = len(tareas)
+        fallidos = 0
+
+        for i, tarea in enumerate(tareas, start=1):
+            info_video = tarea["info"]
+            titulo = info_video.get("title", "Sin título")
+            self.after(0, lambda i=i, t=titulo: self.playlist_progress_label.configure(
+                text=f"Video {i}/{total}: {t}"))
+            self.after(0, lambda i=i: self.playlist_progress_bar.set((i - 1) / total))
+
+            try:
+                ruta_final = youtube.predecir_ruta_final(self.download_path, tipo, info_video)
+                opts = youtube.construir_opciones_descarga(
+                    self.download_path, tipo, tarea["valor_calidad"],
+                    progress_hook=self._progress_hook_playlist(i, total, titulo),
+                )
+                youtube.descargar(info_video["webpage_url"], opts)
+                historial.agregar_entrada(titulo, tipo, ruta_final)
+            except Exception:
+                fallidos += 1  # Video privado/borrado/error puntual: sigue con el resto
+
+        self.after(0, self._finalizar_descarga_playlist, fallidos, total)
+
+    def _progress_hook_playlist(self, indice, total, titulo):
+        def hook(d):
+            if d["status"] == "downloading":
+                try:
+                    descargado = d.get("downloaded_bytes") or 0
+                    total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    progreso_video = (descargado / total_bytes) if total_bytes else 0
+                    progreso_global = ((indice - 1) + progreso_video) / total
+                    self.after(0, lambda p=progreso_global: self.playlist_progress_bar.set(p))
+                except Exception:
+                    pass
+        return hook
+
+    def _finalizar_descarga_playlist(self, fallidos, total):
+        self.playlist_progress_frame.pack_forget()
+        self._actualizar_texto_boton_playlist()
+        self.btn_descargar_playlist.pack(fill="x", padx=15, pady=(0, 20))
+        self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
+        self._refrescar_historial()
+        try:
+            abrir_carpeta(self.download_path)
+        except Exception:
+            pass
+        if fallidos:
+            dialogs.mostrar_advertencia(
+                self, "Descarga completada con avisos",
+                f"{fallidos} de {total} videos no se pudieron descargar "
+                "(posiblemente privados, eliminados o restringidos).",
+            )
 
     def _mostrar_info_basica(self, info):
         top_info_frame = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
@@ -336,8 +577,8 @@ class ClipSaveApp(ctk.CTk):
         format_frame.pack(fill="x", padx=15, pady=5)
 
         self.seg_button = ctk.CTkSegmentedButton(
-            format_frame, values=["Video (MP4)", "Audio (MP3)"], command=self._cambiar_tipo_descarga,
-            dynamic_resizing=False, width=300, height=35,
+            format_frame, values=["Video (MP4)", "Audio (MP3)", "Audio (WAV)"], command=self._cambiar_tipo_descarga,
+            dynamic_resizing=False, width=390, height=35,
             fg_color=styles.COLOR_BORDER, selected_color=styles.COLOR_BORDER_ALT,
             unselected_color=styles.COLOR_BORDER, text_color=styles.COLOR_TEXT_MAIN,
         )
@@ -402,6 +643,9 @@ class ClipSaveApp(ctk.CTk):
         if "Video" in value:
             self.download_type.set("video")
             self._actualizar_opciones_calidad("video")
+        elif "WAV" in value:
+            self.download_type.set("wav")
+            self._actualizar_opciones_calidad("wav")
         else:
             self.download_type.set("mp3")
             self._actualizar_opciones_calidad("mp3")
@@ -409,6 +653,15 @@ class ClipSaveApp(ctk.CTk):
     def _actualizar_opciones_calidad(self, tipo):
         for widget in self.quality_frame.winfo_children():
             widget.destroy()
+
+        if tipo == "wav":
+            # El WAV es sin pérdida: no hay bitrate que elegir, así que no
+            # se muestra un dropdown, solo un aviso informativo.
+            ctk.CTkLabel(self.quality_frame, text="🎼 Sin pérdida (WAV) — no requiere elegir calidad",
+                         text_color=styles.COLOR_TEXT_SECONDARY).pack(anchor="w")
+            self.quality_options_map = {}
+            self.quality_dropdown = None
+            return
 
         if tipo == "video":
             ctk.CTkLabel(self.quality_frame, text="Calidad de video", text_color=styles.COLOR_TEXT_SECONDARY).pack(anchor="w")
@@ -468,8 +721,11 @@ class ClipSaveApp(ctk.CTk):
         self.status_label.configure(text="● Descargando...", text_color=styles.COLOR_PRIMARY)
 
         url = self.current_video_info["webpage_url"]
-        label_calidad = self.quality_dropdown.get()
-        valor_calidad = self.quality_options_map.get(label_calidad)
+        # El WAV no tiene dropdown de calidad (self.quality_dropdown es None ahí)
+        valor_calidad = None
+        if self.quality_dropdown is not None:
+            label_calidad = self.quality_dropdown.get()
+            valor_calidad = self.quality_options_map.get(label_calidad)
 
         opts = youtube.construir_opciones_descarga(
             self.download_path, tipo, valor_calidad, progress_hook=self._progress_hook,
