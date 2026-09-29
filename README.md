@@ -36,7 +36,7 @@ build_installer.bat    REM genera Output\ClipSave-Setup.exe (requiere Inno Setup
 
 ## Apoyar el proyecto
 
-Si te resultó útil, espero que en un futuro tener una seccion de donaciones jeje
+Si te resultó útil, puedes apoyarme para seguir actualizando el proyecto: [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/B2R727UYA1)
 
 
 ## Licencia
