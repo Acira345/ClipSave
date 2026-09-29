@@ -16,6 +16,23 @@ from .utils import bytes_to_mb
 
 MP3_BITRATES = [320, 256, 192, 128]
 
+# Formatos disponibles por tipo. El orden es el orden en que se muestran
+# los botones/dropdowns en la interfaz.
+FORMATOS_AUDIO = ["MP3", "M4A", "OPUS", "OGG", "WAV"]
+FORMATOS_VIDEO = ["MP4", "MKV"]
+
+# De estos, solo MP3 y OGG tienen "calidad" ajustable (se recodifican a un
+# bitrate elegido). M4A y OPUS se descargan en su formato nativo sin
+# recodificar (yt_dlp evita la conversión si el códec ya coincide, así que
+# es rápido y sin pérdida de calidad extra). WAV es sin pérdida por
+# definición. Ninguno de estos tres tiene nada que "elegir".
+FORMATOS_AUDIO_CON_CALIDAD = {"MP3", "OGG"}
+
+# Códec de ffmpeg que le corresponde a cada formato de audio (para el
+# postprocesador FFmpegExtractAudio) y la extensión final del archivo.
+CODEC_POR_FORMATO_AUDIO = {"MP3": "mp3", "OGG": "vorbis", "M4A": "m4a", "OPUS": "opus", "WAV": "wav"}
+EXT_POR_FORMATO_AUDIO = {"MP3": "mp3", "OGG": "ogg", "M4A": "m4a", "OPUS": "opus", "WAV": "wav"}
+
 # Límite de videos a analizar de una playlist, para no colgar la app con
 # listas gigantes (una de 500 videos tardaría muchísimo en analizarse
 # uno por uno). Se puede subir más adelante si hace falta.
@@ -78,13 +95,24 @@ def analizar_entrada(url: str, progreso_callback=None) -> dict:
     return {"tipo": "playlist", "titulo": info_plano.get("title", "Playlist"), "videos": videos}
 
 
-def obtener_opciones_video(info: dict) -> list[dict]:
+def obtener_opciones_calidad(info: dict, tipo: str, formato: str) -> list[dict]:
     """
-    A partir de la metadata de un video, arma la lista de resoluciones
-    disponibles. Cada opción es un dict: {"label": str, "height": int|None}.
-    'height' es None cuando se trata de "Mejor disponible".
+    Punto de entrada único para calcular las opciones de calidad,
+    cualquiera sea el tipo ("audio"/"video") y formato (MP3, MP4, etc.).
+
+    Cada opción es un dict: {"label": str, "valor": int|None, "tamaño_mb": float}.
+    'valor' es la altura en px (video) o el bitrate en kbps (audio con
+    calidad ajustable: MP3/OGG). Para formatos "nativos"/sin pérdida
+    (M4A, OPUS, WAV) no hay nada que elegir y 'valor' es siempre None.
     """
+    if tipo == "video":
+        return _opciones_calidad_video(info, formato)
+    return _opciones_calidad_audio(info, formato)
+
+
+def _opciones_calidad_video(info: dict, formato: str) -> list[dict]:
     formatos = info.get("formats", [])
+    solo_mp4 = formato == "MP4"
 
     best_audio = max(
         (f for f in formatos if f.get("vcodec") == "none" and f.get("acodec") != "none"),
@@ -97,6 +125,8 @@ def obtener_opciones_video(info: dict) -> list[dict]:
     for f in formatos:
         if f.get("vcodec") in ("none", None):
             continue
+        if solo_mp4 and f.get("ext") != "mp4":
+            continue  # MP4 se queda solo con pistas ya en ese contenedor (H.264)
         altura = f.get("height")
         if not altura or not isinstance(altura, int):
             continue
@@ -107,28 +137,44 @@ def obtener_opciones_video(info: dict) -> list[dict]:
     opciones = []
     for altura in sorted(resoluciones.keys(), reverse=True):
         total_mb = bytes_to_mb(resoluciones[altura] + audio_size)
-        opciones.append({"label": f"{altura}p (~{total_mb:.1f} MB)", "height": altura, "tamaño_mb": total_mb})
+        opciones.append({"label": f"{altura}p (~{total_mb:.1f} MB)", "valor": altura, "tamaño_mb": total_mb})
 
     if not opciones:
         # Sin datos de tamaño disponibles (YouTube no siempre los da) — se
-        # deja tamaño_mb en 0 para que no rompa la suma del total estimado,
-        # simplemente no aporta nada a esa cuenta.
-        opciones.append({"label": "Mejor disponible", "height": None, "tamaño_mb": 0})
+        # deja tamaño_mb en 0 para que no rompa la suma del total estimado.
+        opciones.append({"label": "Mejor disponible", "valor": None, "tamaño_mb": 0})
 
     return opciones
 
 
-def obtener_opciones_mp3(info: dict) -> list[dict]:
-    """
-    Arma la lista de bitrates de MP3 disponibles con tamaño estimado.
-    Cada opción es un dict: {"label": str, "bitrate": int, "tamaño_mb": float}.
-    """
+def _opciones_calidad_audio(info: dict, formato: str) -> list[dict]:
+    if formato == "WAV":
+        return [{"label": "Sin pérdida", "valor": None, "tamaño_mb": estimar_tamaño_wav_mb(info)}]
+
+    if formato not in FORMATOS_AUDIO_CON_CALIDAD:
+        # M4A / OPUS: formato nativo, sin recodificar — no hay bitrate que
+        # elegir. Se estima el tamaño con la mejor pista de audio nativa
+        # que YouTube ya ofrezca en ese códec.
+        formatos = info.get("formats", [])
+        mejor = max(
+            (f for f in formatos if f.get("vcodec") in ("none", None) and f.get("acodec") != "none"),
+            key=lambda x: x.get("abr") or 0,
+            default={},
+        )
+        tam = bytes_to_mb(mejor.get("filesize") or mejor.get("filesize_approx") or 0)
+        if tam == 0:
+            abr = mejor.get("abr") or 128
+            duracion = info.get("duration", 0) or 0
+            tam = (abr * duracion) / 8192
+        return [{"label": "Original (sin recodificar)", "valor": None, "tamaño_mb": tam}]
+
+    # MP3 / OGG: calidad ajustable por bitrate, con re-encode
     duracion = info.get("duration", 0)
     opciones = []
     for bitrate in MP3_BITRATES:
         size_mb = (bitrate * duracion) / 8192
         label = f"{bitrate} kbps (~{size_mb:.1f} MB)" if size_mb > 0 else f"{bitrate} kbps"
-        opciones.append({"label": label, "bitrate": bitrate, "tamaño_mb": size_mb})
+        opciones.append({"label": label, "valor": bitrate, "tamaño_mb": size_mb})
     return opciones
 
 
@@ -155,14 +201,18 @@ def formatear_tamaño(mb: float) -> str:
 def construir_opciones_descarga(
     download_path: str,
     tipo: str,
+    formato: str,
     valor_calidad,
     progress_hook=None,
 ) -> dict:
     """
-    Construye el diccionario de opciones para yt_dlp según el tipo
-    de descarga ("video", "mp3" o "wav") y el valor de calidad elegido
-    (altura en px para video, bitrate en kbps para mp3, ignorado para wav
-    ya que es sin pérdida; None = mejor disponible).
+    Construye el diccionario de opciones para yt_dlp.
+
+    tipo: "audio" o "video"
+    formato: para audio, uno de FORMATOS_AUDIO (MP3/M4A/OPUS/OGG/WAV);
+             para video, uno de FORMATOS_VIDEO (MP4/MKV)
+    valor_calidad: bitrate en kbps (audio con calidad ajustable) o altura
+                   en px (video); None = mejor disponible / no aplica
     """
     ruta_salida = os.path.join(download_path, "%(title)s.%(ext)s")
 
@@ -182,49 +232,59 @@ def construir_opciones_descarga(
     if ruta_ffmpeg:
         opts["ffmpeg_location"] = ruta_ffmpeg
 
-    if tipo in ("mp3", "wav"):
-        postprocessor = {"key": "FFmpegExtractAudio", "preferredcodec": tipo}
-        if tipo == "mp3":
+    if tipo == "audio":
+        codec = CODEC_POR_FORMATO_AUDIO[formato]
+        # FFmpegExtractAudio, si la pista descargada ya viene en el códec
+        # pedido (típico para M4A/OPUS, que se piden "nativos"), no
+        # recodifica — solo la remuxea/renombra. Por eso M4A y OPUS salen
+        # rápido y sin pérdida extra de calidad, aunque usen el mismo
+        # postprocesador que MP3/OGG/WAV.
+        postprocessor = {"key": "FFmpegExtractAudio", "preferredcodec": codec}
+        if formato in FORMATOS_AUDIO_CON_CALIDAD and valor_calidad:
             postprocessor["preferredquality"] = str(valor_calidad)
         opts.update({
             "format": "bestaudio/best",
-            # Sin esto, yt_dlp puede dejar el archivo original (.webm/.m4a)
-            # junto al .mp3/.wav ya convertido en vez de borrarlo.
+            # Sin esto, yt_dlp puede dejar el archivo original junto al
+            # ya convertido, en vez de borrarlo.
             "keepvideo": False,
             "postprocessors": [postprocessor],
         })
+
     else:  # video
-        # Se prioriza el códec H.264 (avc1), que es el que reproducen
-        # TODOS los dispositivos y reproductores sin necesidad de instalar
-        # nada extra. Si YouTube no ofrece esa resolución en H.264, se cae
-        # de vuelta a lo mejor disponible (que puede ser VP9 o AV1, más
-        # nuevos pero no siempre soportados por reproductores viejos).
-        if valor_calidad is None:
-            formato = (
-                "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/"
-                "bestvideo+bestaudio/best"
-            )
-        else:
-            formato = (
-                f"bestvideo[vcodec^=avc1][height<={valor_calidad}]+bestaudio[ext=m4a]/"
-                f"bestvideo[height<={valor_calidad}]+bestaudio/"
-                f"best[height<={valor_calidad}]/best"
-            )
-        opts.update({
-            "format": formato,
-            "merge_output_format": "mp4",
-        })
+        if formato == "MP4":
+            # H.264 (avc1) dentro de un contenedor mp4: máxima
+            # compatibilidad, se reproduce en cualquier dispositivo sin
+            # instalar nada extra. Si YouTube no la ofrece en esa
+            # resolución, cae de vuelta a lo mejor disponible en mp4.
+            if valor_calidad is None:
+                formato_ytdlp = (
+                    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+                    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                )
+            else:
+                formato_ytdlp = (
+                    f"bestvideo[ext=mp4][vcodec^=avc1][height<={valor_calidad}]+bestaudio[ext=m4a]/"
+                    f"bestvideo[ext=mp4][height<={valor_calidad}]+bestaudio[ext=m4a]/"
+                    f"best[ext=mp4][height<={valor_calidad}]/best"
+                )
+            opts.update({"format": formato_ytdlp, "merge_output_format": "mp4"})
+        else:  # MKV: permite cualquier códec (VP9/AV1 incluidos), útil para 4K
+            if valor_calidad is None:
+                formato_ytdlp = "bestvideo+bestaudio/best"
+            else:
+                formato_ytdlp = f"bestvideo[height<={valor_calidad}]+bestaudio/best[height<={valor_calidad}]/best"
+            opts.update({"format": formato_ytdlp, "merge_output_format": "mkv"})
 
     return opts
 
 
-def predecir_ruta_final(download_path: str, tipo: str, info: dict) -> str:
+def predecir_ruta_final(download_path: str, tipo: str, formato: str, info: dict) -> str:
     """
     Calcula la ruta completa donde va a quedar el archivo una vez
-    terminada la descarga (con la extensión final: mp3 o mp4), para
-    poder revisar de antemano si ya existe un archivo con ese nombre.
+    terminada la descarga (con su extensión final), para poder revisar
+    de antemano si ya existe un archivo con ese nombre.
     """
-    ext_final = tipo if tipo in ("mp3", "wav") else "mp4"
+    ext_final = EXT_POR_FORMATO_AUDIO[formato] if tipo == "audio" else formato.lower()
     outtmpl = os.path.join(download_path, "%(title)s.%(ext)s")
     with yt_dlp.YoutubeDL({"outtmpl": outtmpl, "quiet": True, "no_warnings": True}) as ydl:
         nombre_base = ydl.prepare_filename(info)
