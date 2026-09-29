@@ -47,6 +47,7 @@ class ClipSaveApp(ctk.CTk):
         self.current_video_info = None
         self.download_type = tk.StringVar(value="video")
         self.quality_options_map = {}  # label -> valor (height o bitrate)
+        self.cola_descargas = []  # cada item: {"info","tipo","formato","valor_calidad","titulo"}
         self._spinner_index = 0
         self._animando_spinner = False
 
@@ -125,14 +126,14 @@ class ClipSaveApp(ctk.CTk):
 
         ctk.CTkLabel(self.main_content, text="Descargar video", font=styles.FONT_TITLE,
                      text_color=styles.COLOR_TEXT_MAIN).pack(anchor="w", padx=30, pady=(30, 5))
-        ctk.CTkLabel(self.main_content, text="Pega un enlace de YouTube y elige cómo quieres guardarlo.",
+        ctk.CTkLabel(self.main_content, text="Escribe el nombre del video o pega un enlace de YouTube y elige cómo quieres guardarlo.",
                      text_color=styles.COLOR_TEXT_MUTED).pack(anchor="w", padx=30, pady=(0, 20))
 
         self.search_frame = ctk.CTkFrame(self.main_content, fg_color=styles.COLOR_BG_WHITE, corner_radius=8,
                                           border_width=1, border_color=styles.COLOR_BORDER_ALT)
         self.search_frame.pack(fill="x", padx=30, pady=10)
 
-        self.url_entry = ctk.CTkEntry(self.search_frame, placeholder_text="https://www.youtube.com/watch?v=...",
+        self.url_entry = ctk.CTkEntry(self.search_frame, placeholder_text="Pega un enlace de YouTube o busca por texto...",
                                        fg_color="transparent", border_width=0, text_color=styles.COLOR_TEXT_MAIN, height=45)
         self.url_entry.pack(side="left", fill="x", expand=True, padx=10)
         self.url_entry.bind("<Return>", lambda e: self.analizar_url())
@@ -158,8 +159,36 @@ class ClipSaveApp(ctk.CTk):
         self.recent_frame.grid(row=1, column=1, sticky="nsew")
         self.recent_frame.grid_propagate(False)
 
-        ctk.CTkLabel(self.recent_frame, text="Historial", font=styles.FONT_SECTION,
+        # --- Cola de Descargas: lo que vas agregando antes de bajarlo todo junto ---
+        ctk.CTkLabel(self.recent_frame, text="Cola de descargas", font=styles.FONT_SECTION,
                      text_color=styles.COLOR_TEXT_MAIN).pack(anchor="w", padx=20, pady=(20, 10))
+
+        self.cola_frame = ctk.CTkScrollableFrame(self.recent_frame, fg_color="transparent", height=220)
+        self.cola_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        self.btn_descargar_cola = ctk.CTkButton(
+            self.recent_frame, text="Descargar lista (0)", command=self.iniciar_descarga_cola,
+            fg_color=styles.COLOR_PRIMARY, hover_color=styles.COLOR_PRIMARY_HOVER,
+            font=styles.FONT_BUTTON, height=38,
+        )
+        self.btn_descargar_cola.pack(fill="x", padx=20, pady=(0, 8))
+
+        # Ocupa el mismo espacio que iría debajo del botón mientras se
+        # descarga la lista completa; arranca oculto.
+        self.cola_progress_frame = ctk.CTkFrame(self.recent_frame, fg_color="transparent")
+        self.cola_progress_bar = ctk.CTkProgressBar(self.cola_progress_frame, progress_color=styles.COLOR_PRIMARY,
+                                                     fg_color=styles.COLOR_BORDER_ALT, height=10)
+        self.cola_progress_bar.set(0)
+        self.cola_progress_bar.pack(fill="x", padx=20, pady=(0, 4))
+        self.cola_progress_label = ctk.CTkLabel(self.cola_progress_frame, text="",
+                                                 text_color=styles.COLOR_TEXT_MUTED, font=("Arial", 10))
+        self.cola_progress_label.pack(anchor="w", padx=20)
+
+        self._refrescar_cola()
+
+        # --- Historial: lo que ya se descargó (como estaba) ---
+        ctk.CTkLabel(self.recent_frame, text="Historial", font=styles.FONT_SECTION,
+                     text_color=styles.COLOR_TEXT_MAIN).pack(anchor="w", padx=20, pady=(15, 10))
 
         self.historial_frame = ctk.CTkScrollableFrame(self.recent_frame, fg_color="transparent")
         self.historial_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -221,9 +250,6 @@ class ClipSaveApp(ctk.CTk):
         self.url_entry.delete(0, tk.END)
         self.current_video_info = None
         self.preview_frame.pack_forget()
-        if hasattr(self, "progress_bar"):
-            self.progress_bar.set(0)
-            self.progress_text.configure(text="Esperando enlace...")
         self._animando_spinner = False
         self.btn_analizar.configure(state="normal", text="Analizar")
         self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
@@ -250,7 +276,8 @@ class ClipSaveApp(ctk.CTk):
     def analizar_url(self):
         url = self.url_entry.get()
         if not url:
-            dialogs.mostrar_advertencia(self, "Falta la URL", "Por favor, pega una URL de YouTube.")
+            dialogs.mostrar_advertencia(self, "Campo vacío",
+                                         "Escribe un término de búsqueda o pega una URL de YouTube.")
             return
 
         self.status_label.configure(text="● Analizando...", text_color=styles.COLOR_WARNING)
@@ -274,9 +301,11 @@ class ClipSaveApp(ctk.CTk):
                 text=f"● Analizando {actual}/{total}...", text_color=styles.COLOR_WARNING))
 
         try:
-            resultado = youtube.analizar_entrada(url, progreso_callback=progreso)
+            resultado = youtube.procesar_busqueda(url, progreso_callback=progreso)
             if resultado["tipo"] == "playlist":
                 self.after(0, self._mostrar_previsualizacion_playlist, resultado)
+            elif resultado["tipo"] == "busqueda":
+                self.after(0, self._mostrar_resultados_busqueda, resultado["resultados"])
             else:
                 self.after(0, self._mostrar_previsualizacion, resultado["info"])
         except Exception as e:
@@ -292,6 +321,48 @@ class ClipSaveApp(ctk.CTk):
     # ------------------------------------------------------------------
     # Previsualización
     # ------------------------------------------------------------------
+
+    def _mostrar_resultados_busqueda(self, resultados):
+        """Muestra hasta 5 tarjetas clicables cuando el usuario buscó por
+        texto en vez de pegar una URL. Al hacer click en una, se reutiliza
+        _mostrar_previsualizacion tal cual funciona para un video pegado
+        directamente."""
+        self._resetear_busqueda()
+
+        for widget in self.preview_frame.winfo_children():
+            widget.destroy()
+        self.preview_frame.pack(fill="x", padx=30, pady=20)
+
+        ctk.CTkLabel(self.preview_frame, text="Resultados de la búsqueda", font=styles.FONT_SECTION,
+                     text_color=styles.COLOR_TEXT_MAIN).pack(anchor="w", padx=15, pady=(15, 10))
+
+        if not resultados:
+            ctk.CTkLabel(self.preview_frame, text="No se encontró nada con ese término.",
+                         text_color=styles.COLOR_TEXT_MUTED).pack(anchor="w", padx=15, pady=(0, 15))
+            return
+
+        for info_resultado in resultados:
+            self._crear_tarjeta_resultado(info_resultado)
+
+        ctk.CTkLabel(self.preview_frame, text="", height=1).pack(pady=5)  # respiro final
+
+    def _crear_tarjeta_resultado(self, info_resultado):
+        tarjeta = ctk.CTkFrame(self.preview_frame, fg_color=styles.COLOR_BG_LIGHT, corner_radius=8, cursor="hand2")
+        tarjeta.pack(fill="x", padx=15, pady=5)
+        contenido = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        contenido.pack(fill="x", padx=12, pady=10)
+
+        titulo = info_resultado.get("title", "Sin título")
+        canal = info_resultado.get("uploader") or info_resultado.get("channel") or ""
+        duracion = format_duration(info_resultado.get("duration"))
+
+        ctk.CTkLabel(contenido, text=titulo, font=styles.FONT_VIDEO_TITLE, text_color=styles.COLOR_TEXT_MAIN,
+                     anchor="w", wraplength=450, justify="left").pack(anchor="w")
+        ctk.CTkLabel(contenido, text=f"{canal} · {duracion}", text_color=styles.COLOR_TEXT_MUTED,
+                     anchor="w").pack(anchor="w", pady=(2, 0))
+
+        for widget in (tarjeta, contenido):
+            widget.bind("<Button-1>", lambda e, info=info_resultado: self._mostrar_previsualizacion(info))
 
     def _mostrar_previsualizacion(self, info):
         self.current_video_info = info
@@ -711,36 +782,15 @@ class ClipSaveApp(ctk.CTk):
                       text_color=styles.COLOR_PRIMARY, hover_color=styles.COLOR_HOVER_LIGHT, width=60).pack(side="right", padx=10)
 
     def _mostrar_boton_descarga(self):
-        self.btn_descargar_ya = ctk.CTkButton(
-            self.preview_frame, text="Descargar ahora", command=self.iniciar_descarga,
+        # Ya no descarga al toque: agrega el video (con su formato y
+        # calidad elegidos) a la Cola de Descargas del panel derecho.
+        # La descarga real pasa a ser en lote, desde ahí.
+        self.btn_agregar_lista = ctk.CTkButton(
+            self.preview_frame, text="➕ Añadir a la lista", command=self.agregar_a_cola,
             fg_color=styles.COLOR_PRIMARY, hover_color=styles.COLOR_PRIMARY_HOVER,
             font=styles.FONT_BUTTON, height=45,
         )
-        self.btn_descargar_ya.pack(fill="x", padx=15, pady=20)
-
-        # Ocupa el mismo lugar que el botón, pero arranca oculto: se
-        # muestra en vez del botón mientras la descarga está en curso.
-        self.progress_inline_frame = ctk.CTkFrame(self.preview_frame, fg_color="transparent")
-
-        self.progress_bar = ctk.CTkProgressBar(self.progress_inline_frame, progress_color=styles.COLOR_PRIMARY,
-                                                fg_color=styles.COLOR_BORDER_ALT, height=12)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", pady=(0, 8))
-
-        self.progress_text = ctk.CTkLabel(self.progress_inline_frame, text="Iniciando descarga...",
-                                           text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
-                                           wraplength=500, justify="left")
-        self.progress_text.pack(anchor="w")
-
-    def _mostrar_barra_progreso(self):
-        self.btn_descargar_ya.pack_forget()
-        self.progress_bar.set(0)
-        self.progress_text.configure(text="Iniciando descarga...")
-        self.progress_inline_frame.pack(fill="x", padx=15, pady=20)
-
-    def _ocultar_barra_progreso(self):
-        self.progress_inline_frame.pack_forget()
-        self.btn_descargar_ya.pack(fill="x", padx=15, pady=20)
+        self.btn_agregar_lista.pack(fill="x", padx=15, pady=20)
 
     # ------------------------------------------------------------------
     # Selección de tipo y calidad (usa core.youtube para calcular opciones)
@@ -782,11 +832,70 @@ class ClipSaveApp(ctk.CTk):
             self.path_label.configure(text=f"📂 Guardar en: {truncate_path(self.download_path)}")
 
     # ------------------------------------------------------------------
-    # Descarga (arma opts con core.youtube y ejecuta en un hilo)
+    # Cola de Descargas (panel derecho): agregar, quitar, y descargar en lote
     # ------------------------------------------------------------------
 
-    def iniciar_descarga(self):
+    def agregar_a_cola(self):
+        """Toma la selección actual (video + tipo + formato + calidad) y
+        la guarda en la cola local, en vez de descargar de inmediato."""
         if not self.current_video_info:
+            return
+
+        tipo = self.download_type.get()
+        formato = self.formato_actual
+        valor_calidad = None
+        if self.quality_dropdown is not None:
+            valor_calidad = self.quality_options_map.get(self.quality_dropdown.get())
+
+        self.cola_descargas.append({
+            "info": self.current_video_info,
+            "tipo": tipo,
+            "formato": formato,
+            "valor_calidad": valor_calidad,
+            "titulo": self.current_video_info.get("title", "Sin título"),
+        })
+        self._refrescar_cola()
+        self.reiniciar_formulario()
+
+    def _refrescar_cola(self):
+        for widget in self.cola_frame.winfo_children():
+            widget.destroy()
+
+        if not self.cola_descargas:
+            ctk.CTkLabel(self.cola_frame, text="Agrega videos desde la izquierda para armar tu lista.",
+                         text_color=styles.COLOR_TEXT_MUTED, font=styles.FONT_LABEL_SMALL,
+                         wraplength=250, justify="left").pack(fill="x", padx=10, pady=5)
+        else:
+            for indice, item in enumerate(self.cola_descargas):
+                self._crear_item_cola(item, indice)
+
+        self.btn_descargar_cola.configure(text=f"Descargar lista ({len(self.cola_descargas)})")
+
+    def _crear_item_cola(self, item, indice):
+        fila = ctk.CTkFrame(self.cola_frame, fg_color=styles.COLOR_BG_WHITE, corner_radius=8)
+        fila.pack(fill="x", pady=4)
+        contenido = ctk.CTkFrame(fila, fg_color="transparent")
+        contenido.pack(fill="x", padx=10, pady=6)
+
+        icono = "🎵" if item["tipo"] == "audio" else "🎬"
+        titulo = item["titulo"]
+        if len(titulo) > 26:
+            titulo = titulo[:26] + "..."
+        ctk.CTkLabel(contenido, text=f"{icono} {titulo}", text_color=styles.COLOR_TEXT_MAIN,
+                     font=styles.FONT_LABEL_SMALL, anchor="w").pack(side="left", fill="x", expand=True)
+
+        ctk.CTkButton(contenido, text="✕", width=24, height=24, fg_color="transparent",
+                      text_color=styles.COLOR_TEXT_MUTED, hover_color=styles.COLOR_HOVER_LIGHT,
+                      command=lambda i=indice: self._quitar_de_cola(i)).pack(side="right")
+
+    def _quitar_de_cola(self, indice):
+        del self.cola_descargas[indice]
+        self._refrescar_cola()
+
+    def iniciar_descarga_cola(self):
+        if not self.cola_descargas:
+            dialogs.mostrar_advertencia(self, "Lista vacía",
+                                         "Agrega al menos un video a la lista antes de descargar.")
             return
 
         if not youtube.ffmpeg_disponible():
@@ -797,54 +906,79 @@ class ClipSaveApp(ctk.CTk):
             )
             return
 
-        tipo = self.download_type.get()
-        formato = self.formato_actual
-        ruta_final = youtube.predecir_ruta_final(self.download_path, tipo, formato, self.current_video_info)
-        if os.path.exists(ruta_final):
-            reemplazar = dialogs.confirmar(
-                self, "El archivo ya existe",
-                f"'{os.path.basename(ruta_final)}' ya existe en la carpeta de descargas.\n"
-                "¿Quieres reemplazarlo?",
-            )
-            if not reemplazar:
-                return
+        nombre_carpeta = ctk.CTkInputDialog(
+            text="¿Cómo quieres llamar a esta carpeta/playlist?", title="Nombre de la lista",
+        ).get_input()
+        if not nombre_carpeta:
+            return  # Canceló el diálogo
 
-        self._mostrar_barra_progreso()
+        tareas = list(self.cola_descargas)  # copia: la cola visible se limpia al terminar
+        self.btn_descargar_cola.configure(state="disabled")
+        self.cola_progress_bar.set(0)
+        self.cola_progress_label.configure(text="Iniciando descarga...")
+        self.cola_progress_frame.pack(fill="x", padx=20, pady=(0, 10))
         self.status_label.configure(text="● Descargando...", text_color=styles.COLOR_PRIMARY)
 
-        url = self.current_video_info["webpage_url"]
-        # Formatos "nativos" (M4A/OPUS/WAV) no tienen dropdown de calidad
-        # (self.quality_dropdown es None ahí, no hay nada que elegir).
-        valor_calidad = None
-        if self.quality_dropdown is not None:
-            label_calidad = self.quality_dropdown.get()
-            valor_calidad = self.quality_options_map.get(label_calidad)
+        threading.Thread(target=self._hilo_descarga_cola, args=(tareas, nombre_carpeta), daemon=True).start()
 
-        opts = youtube.construir_opciones_descarga(
-            self.download_path, tipo, formato, valor_calidad, progress_hook=self._progress_hook,
-        )
-        titulo = self.current_video_info.get("title", "Sin título")
+    def _hilo_descarga_cola(self, tareas, nombre_carpeta):
+        total = len(tareas)
+        fallidos = 0
 
-        threading.Thread(target=self._hilo_descarga, args=(url, opts, titulo, tipo, ruta_final), daemon=True).start()
+        for i, tarea in enumerate(tareas, start=1):
+            titulo = tarea["titulo"]
+            self.after(0, lambda i=i, t=titulo: self.cola_progress_label.configure(text=f"{i}/{total}: {t}"))
+            self.after(0, lambda i=i: self.cola_progress_bar.set((i - 1) / total))
 
-    def _hilo_descarga(self, url, opts, titulo, tipo, ruta_final):
-        try:
-            youtube.descargar(url, opts)
             try:
-                abrir_carpeta(self.download_path)
+                opts = youtube.construir_opciones_descarga(
+                    self.download_path, tarea["tipo"], tarea["formato"], tarea["valor_calidad"],
+                    progress_hook=self._progress_hook_cola(i, total), nombre_carpeta=nombre_carpeta,
+                )
+                ruta_final = youtube.predecir_ruta_final(
+                    self.download_path, tarea["tipo"], tarea["formato"], tarea["info"],
+                    nombre_carpeta=nombre_carpeta,
+                )
+                youtube.descargar(tarea["info"]["webpage_url"], opts)
+                historial.agregar_entrada(titulo, tarea["tipo"], ruta_final)
             except Exception:
-                pass  # Si no se pudo abrir la carpeta, no interrumpe el flujo de éxito
-            historial.agregar_entrada(titulo, tipo, ruta_final)
-            self.after(0, self._refrescar_historial)
-        except Exception as e:
-            mensaje_error = str(e)
-            self.after(0, lambda m=mensaje_error: dialogs.mostrar_error(self, "Error al descargar", m))
-        finally:
-            self.after(0, self._finalizar_estado_descarga)
+                fallidos += 1  # Un video privado/borrado/con error no tumba el resto de la lista
 
-    def _finalizar_estado_descarga(self):
-        self._ocultar_barra_progreso()
+        self.after(0, self._finalizar_descarga_cola, fallidos, total, nombre_carpeta)
+
+    def _progress_hook_cola(self, indice, total):
+        def hook(d):
+            if d["status"] == "downloading":
+                try:
+                    descargado = d.get("downloaded_bytes") or 0
+                    total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    progreso_item = (descargado / total_bytes) if total_bytes else 0
+                    progreso_global = ((indice - 1) + progreso_item) / total
+                    self.after(0, lambda p=progreso_global: self.cola_progress_bar.set(p))
+                except Exception:
+                    pass
+        return hook
+
+    def _finalizar_descarga_cola(self, fallidos, total, nombre_carpeta):
+        self.cola_progress_frame.pack_forget()
+        self.btn_descargar_cola.configure(state="normal")
         self.status_label.configure(text="● Listo", text_color=styles.COLOR_SUCCESS)
+
+        self.cola_descargas.clear()
+        self._refrescar_cola()
+        self._refrescar_historial()
+
+        try:
+            abrir_carpeta(os.path.join(self.download_path, nombre_carpeta))
+        except Exception:
+            pass
+
+        if fallidos:
+            dialogs.mostrar_advertencia(
+                self, "Descarga completada con avisos",
+                f"{fallidos} de {total} elementos no se pudieron descargar "
+                "(posiblemente privados, eliminados o restringidos).",
+            )
 
     # ------------------------------------------------------------------
     # Actualizaciones
@@ -859,26 +993,3 @@ class ClipSaveApp(ctk.CTk):
         url = info["url"]
         self.update_label.configure(text=f"🔔 Nueva versión {info['version']} disponible")
         self.update_label.bind("<Button-1>", lambda e: webbrowser.open(url))
-
-    def _progress_hook(self, d):
-        if d["status"] == "downloading":
-            try:
-                downloaded = d.get("downloaded_bytes") or 0
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-
-                if total > 0:
-                    progress = downloaded / total
-                    dl_mb = downloaded / (1024 * 1024)
-                    tot_mb = total / (1024 * 1024)
-                    speed = d.get("_speed_str", "N/A")
-                    texto = f"Descargando: {dl_mb:.1f} MB / {tot_mb:.1f} MB ({progress * 100:.1f}%) - {speed}"
-                    self.after(0, lambda p=progress: self.progress_bar.set(p))
-                else:
-                    texto = f"Iniciando: {d.get('_downloaded_bytes_str', 'N/A')} - {d.get('_speed_str', 'N/A')}"
-
-                self.after(0, lambda t=texto: self.progress_text.configure(text=t))
-            except Exception:
-                pass
-        elif d["status"] == "finished":
-            self.after(0, lambda: self.progress_text.configure(text="Procesando archivo final (uniendo audio/video)..."))
-            self.after(0, lambda: self.progress_bar.set(1.0))

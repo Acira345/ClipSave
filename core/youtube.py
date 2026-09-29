@@ -204,6 +204,7 @@ def construir_opciones_descarga(
     formato: str,
     valor_calidad,
     progress_hook=None,
+    nombre_carpeta: str | None = None,
 ) -> dict:
     """
     Construye el diccionario de opciones para yt_dlp.
@@ -213,8 +214,18 @@ def construir_opciones_descarga(
              para video, uno de FORMATOS_VIDEO (MP4/MKV)
     valor_calidad: bitrate en kbps (audio con calidad ajustable) o altura
                    en px (video); None = mejor disponible / no aplica
+    nombre_carpeta: si se da, los archivos quedan dentro de una subcarpeta
+                    con ese nombre en vez de sueltos en download_path
+                    (se crea si no existe). Pensado para la Cola de
+                    Descargas, donde varios videos se agrupan en una
+                    misma carpeta/"playlist local".
     """
-    ruta_salida = os.path.join(download_path, "%(title)s.%(ext)s")
+    carpeta_destino = download_path
+    if nombre_carpeta:
+        carpeta_destino = os.path.join(download_path, nombre_carpeta)
+        os.makedirs(carpeta_destino, exist_ok=True)
+
+    ruta_salida = os.path.join(carpeta_destino, "%(title)s.%(ext)s")
 
     opts = {
         "outtmpl": ruta_salida,
@@ -278,18 +289,45 @@ def construir_opciones_descarga(
     return opts
 
 
-def predecir_ruta_final(download_path: str, tipo: str, formato: str, info: dict) -> str:
+def predecir_ruta_final(
+    download_path: str, tipo: str, formato: str, info: dict, nombre_carpeta: str | None = None,
+) -> str:
     """
     Calcula la ruta completa donde va a quedar el archivo una vez
     terminada la descarga (con su extensión final), para poder revisar
-    de antemano si ya existe un archivo con ese nombre.
+    de antemano si ya existe un archivo con ese nombre. Debe recibir el
+    mismo nombre_carpeta que se le pase a construir_opciones_descarga.
     """
+    carpeta_destino = os.path.join(download_path, nombre_carpeta) if nombre_carpeta else download_path
     ext_final = EXT_POR_FORMATO_AUDIO[formato] if tipo == "audio" else formato.lower()
-    outtmpl = os.path.join(download_path, "%(title)s.%(ext)s")
+    outtmpl = os.path.join(carpeta_destino, "%(title)s.%(ext)s")
     with yt_dlp.YoutubeDL({"outtmpl": outtmpl, "quiet": True, "no_warnings": True}) as ydl:
         nombre_base = ydl.prepare_filename(info)
     raiz, _ = os.path.splitext(nombre_base)
     return f"{raiz}.{ext_final}"
+
+
+def procesar_busqueda(texto: str, progreso_callback=None) -> dict:
+    """
+    Punto de entrada único para la barra de búsqueda: acepta tanto una
+    URL de YouTube (video o playlist) como texto libre para buscar.
+
+    Devuelve uno de:
+      - {"tipo": "video", "info": {...}}
+      - {"tipo": "playlist", "titulo": str, "videos": [...]}
+      - {"tipo": "busqueda", "resultados": [info, info, ...]}  (hasta 5,
+        cada uno con metadata completa — mismas calidades/tamaños que un
+        video analizado individualmente, listo para elegir formato)
+    """
+    texto = texto.strip()
+    if texto.lower().startswith("http"):
+        return analizar_entrada(texto, progreso_callback=progreso_callback)
+
+    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+        info_busqueda = ydl.extract_info(f"ytsearch5:{texto}", download=False)
+
+    resultados = list(info_busqueda.get("entries") or [])
+    return {"tipo": "busqueda", "resultados": resultados}
 
 
 def descargar(url: str, opts: dict) -> None:
