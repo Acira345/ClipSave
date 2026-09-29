@@ -5,7 +5,7 @@ Descargador de YouTube a MP4 o MP3, simple y gratuito.
 ## Descargar
 
 Ve a la sección [Releases](../../releases) de este repositorio y descarga
-`ClipSave-Setup.exe` (o el `.zip`, según lo que hayas publicado). Instálalo
+`ClipSave-Setup.exe`. Instálalo
 y listo — no necesitas Python ni nada más instalado en tu computadora.
 
 ## Aviso
